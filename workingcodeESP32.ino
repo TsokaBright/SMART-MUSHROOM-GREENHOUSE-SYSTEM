@@ -1,0 +1,337 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <WiFiClientSecure.h>
+#include <ArduinoJson.h>
+
+// ================= WiFi CONFIGURATION =================
+// Update these with your network credentials
+const char* ssid = "Tsoka";
+const char* password = "Browntsoka";
+
+// Google Apps Script Web App URL - Do not change unless deploying new script
+const String GAS_URL = "https://script.google.com/macros/s/AKfycbwV2fcVpGjNCH0Q98sIMOwVJrM3yPmhIZiShEWJlxc3JO0ncbxiCnVACbbewMrqBIr3OA/exec";
+
+// ================= DATA VARIABLES =================
+// Stores readings from 5 growing zones
+float temp[5] = {0, 0, 0, 0, 0};
+float hum[5] = {0, 0, 0, 0, 0};
+float moisture[5] = {0, 0, 0, 0, 0};
+int co2 = 0;
+String currentMode = "IDLE";
+bool systemActive = true;  // Controls whether data is sent to cloud
+
+// Buffer for assembling incoming serial data
+String receiveBuffer = "";
+
+// Timing control - send to Google Sheets every 10 seconds
+unsigned long lastSendTime = 0;
+const unsigned long SEND_INTERVAL = 10000;
+
+// ================= CONNECT WiFi =================
+// Attempts to connect to WiFi network
+void connectWiFi() {
+  Serial.print("Connecting to WiFi");
+  WiFi.begin(ssid, password);
+  
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+  }
+  
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nWiFi Connected!");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nWiFi Failed! Check credentials.");
+  }
+}
+
+// ================= RECONNECT WiFi =================
+// Checks and restores WiFi connection if lost
+void reconnectWiFi() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("\nWiFi disconnected. Reconnecting...");
+    WiFi.reconnect();
+    
+    int count = 0;
+    while (WiFi.status() != WL_CONNECTED && count < 20) {
+      delay(1000);
+      Serial.print(".");
+      count++;
+    }
+    
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nWiFi Reconnected!");
+    } else {
+      Serial.println("\nReconnect failed!");
+    }
+  }
+}
+
+// ================= SEND TO GOOGLE SHEETS =================
+// Posts all sensor data to Google Sheets via HTTP POST with JSON
+void sendToGoogleSheets() {
+  // Skip if system is stopped
+  if (!systemActive) {
+    Serial.println("System stopped - Not sending to Google Sheets");
+    return;
+  }
+  
+  // Rate limiting - prevent excessive API calls
+  if (millis() - lastSendTime < SEND_INTERVAL) {
+    return;
+  }
+  
+  // Ensure WiFi is connected before sending
+  if (WiFi.status() != WL_CONNECTED) {
+    reconnectWiFi();
+    if (WiFi.status() != WL_CONNECTED) {
+      Serial.println("Cannot send - WiFi disconnected");
+      return;
+    }
+  }
+  
+  Serial.println("\nSending to Google Sheets via POST...");
+  
+  // Build JSON payload with all sensor readings
+  StaticJsonDocument<512> jsonDoc;
+  
+  // Add temperature readings for all 5 zones
+  jsonDoc["temp1"] = temp[0];
+  jsonDoc["temp2"] = temp[1];
+  jsonDoc["temp3"] = temp[2];
+  jsonDoc["temp4"] = temp[3];
+  jsonDoc["temp5"] = temp[4];
+  
+  // Add humidity readings for all 5 zones
+  jsonDoc["hum1"] = hum[0];
+  jsonDoc["hum2"] = hum[1];
+  jsonDoc["hum3"] = hum[2];
+  jsonDoc["hum4"] = hum[3];
+  jsonDoc["hum5"] = hum[4];
+  
+  // Add CO2 level
+  jsonDoc["co2"] = co2;
+  
+  // Add soil moisture readings for all 5 zones
+  jsonDoc["moist1"] = moisture[0];
+  jsonDoc["moist2"] = moisture[1];
+  jsonDoc["moist3"] = moisture[2];
+  jsonDoc["moist4"] = moisture[3];
+  jsonDoc["moist5"] = moisture[4];
+  
+  // Add system status information
+  jsonDoc["mode"] = currentMode;
+  jsonDoc["status"] = systemActive ? "ACTIVE" : "STOPPED";
+  
+  // Convert JSON to string for transmission
+  String jsonString;
+  serializeJson(jsonDoc, jsonString);
+  
+  // Setup HTTPS client (bypass SSL verification for simplicity)
+  WiFiClientSecure client;
+  client.setInsecure();
+  
+  HTTPClient http;
+  http.begin(client, GAS_URL);
+  http.addHeader("Content-Type", "application/json");
+  http.setTimeout(10000);
+  
+  // Execute POST request
+  int httpCode = http.POST(jsonString);
+  String response = http.getString();
+  
+  // Check response status
+  if (httpCode == 200) {
+    response.trim();
+    if (response == "SUCCESS") {
+      Serial.println("DATA SAVED TO GOOGLE SHEET!");
+      lastSendTime = millis();
+    } else {
+      Serial.println("Response: " + response);
+    }
+  } else {
+    Serial.print("HTTP Error: ");
+    Serial.println(httpCode);
+  }
+  
+  http.end();
+}
+
+// ================= PARSE DATA FROM MEGA =================
+// Processes incoming serial data from Arduino Mega
+void parseMegaData(String data) {
+  // Clean up formatting
+  data.trim();
+  data.replace(" ", "");
+  data.replace("\r", "");
+  data.replace("\n", "");
+  
+  if (data.length() == 0) return;
+  
+  // Fix legacy packet formats (DATA1, DATA2, DATA3)
+  if (data.startsWith("DATA1:") || data.startsWith("DATA2:") || data.startsWith("DATA3:")) {
+    data = "DATA:" + data.substring(5);
+  }
+  
+  Serial.println("\nRaw data from Mega: " + data);
+  
+  // Handle STOP command - disable cloud data sending
+  if (data == "STOP") {
+    systemActive = false;
+    currentMode = "STOPPED";
+    Serial.println("STOP command received!");
+    Serial.println("System STOPPED - No more data will be sent to Google Sheets");
+    Serial.println("Press RESET or select a new mode to restart");
+    return;
+  }
+  
+  // Handle MODE command - update operation mode and reactivate
+  if (data.startsWith("MODE:")) {
+    data.remove(0, 5);
+    currentMode = data;
+    systemActive = true;
+    Serial.println("Mode updated to: " + currentMode);
+    Serial.println("System ACTIVE - Data will be sent to Google Sheets");
+    return;
+  }
+  
+  // Handle RESET command - clear mode and stop sending
+  if (data == "RESET") {
+    currentMode = "IDLE";
+    systemActive = false;
+    Serial.println("System RESET - Mode: IDLE");
+    Serial.println("System stopped - No data sending");
+    return;
+  }
+  
+  // Parse sensor data packet (DATA: format)
+  if (data.startsWith("DATA:")) {
+    // Ignore data if system is stopped
+    if (!systemActive) {
+      Serial.println("System stopped - Ignoring sensor data");
+      return;
+    }
+    
+    // Remove "DATA:" prefix
+    data.remove(0, 5);
+    
+    // Verify packet has enough values (16 expected: 5 temp, 5 hum, 1 co2, 5 moisture)
+    int commaCount = 0;
+    for (int i = 0; i < data.length(); i++) {
+      if (data[i] == ',') commaCount++;
+    }
+    
+    if (commaCount < 15) {
+      Serial.println("Invalid packet! Expected 16 values");
+      return;
+    }
+    
+    int lastIndex = 0;
+    
+    // Extract 5 temperature readings
+    for (int i = 0; i < 5; i++) {
+      int commaIndex = data.indexOf(',', lastIndex);
+      if (commaIndex == -1) commaIndex = data.length();
+      temp[i] = data.substring(lastIndex, commaIndex).toFloat();
+      lastIndex = commaIndex + 1;
+    }
+    
+    // Extract 5 humidity readings
+    for (int i = 0; i < 5; i++) {
+      int commaIndex = data.indexOf(',', lastIndex);
+      if (commaIndex == -1) commaIndex = data.length();
+      hum[i] = data.substring(lastIndex, commaIndex).toFloat();
+      lastIndex = commaIndex + 1;
+    }
+    
+    // Extract CO2 reading
+    int commaIndex = data.indexOf(',', lastIndex);
+    if (commaIndex == -1) commaIndex = data.length();
+    co2 = data.substring(lastIndex, commaIndex).toInt();
+    lastIndex = commaIndex + 1;
+    
+    // Extract 5 soil moisture readings
+    for (int i = 0; i < 5; i++) {
+      commaIndex = data.indexOf(',', lastIndex);
+      if (commaIndex == -1) commaIndex = data.length();
+      moisture[i] = data.substring(lastIndex, commaIndex).toFloat();
+      lastIndex = commaIndex + 1;
+    }
+    
+    // Print summary of received data for debugging
+    Serial.println("\nData Summary:");
+    Serial.print("Zone1: "); Serial.print(temp[0], 1); Serial.print("C, "); Serial.print(hum[0], 0); Serial.println("%");
+    Serial.print("Zone2: "); Serial.print(temp[1], 1); Serial.print("C, "); Serial.print(hum[1], 0); Serial.println("%");
+    Serial.print("Zone3: "); Serial.print(temp[2], 1); Serial.print("C, "); Serial.print(hum[2], 0); Serial.println("%");
+    Serial.print("Zone4: "); Serial.print(temp[3], 1); Serial.print("C, "); Serial.print(hum[3], 0); Serial.println("%");
+    Serial.print("Zone5: "); Serial.print(temp[4], 1); Serial.print("C, "); Serial.print(hum[4], 0); Serial.println("%");
+    Serial.print("CO2: "); Serial.print(co2); Serial.println(" ppm");
+    Serial.print("Soil: "); Serial.print(moisture[0], 0); Serial.print("%, "); Serial.print(moisture[1], 0); Serial.print("%, ");
+    Serial.print(moisture[2], 0); Serial.print("%, "); Serial.print(moisture[3], 0); Serial.print("%, "); Serial.print(moisture[4], 0); Serial.println("%");
+    Serial.print("Mode: "); Serial.println(currentMode);
+    Serial.print("Status: "); Serial.println(systemActive ? "ACTIVE - Sending data" : "STOPPED - Not sending");
+    
+    // Forward data to Google Sheets
+    sendToGoogleSheets();
+  }
+}
+
+// ================= SETUP =================
+void setup() {
+  // Initialize serial communications
+  Serial.begin(115200);      // Debug console
+  Serial2.begin(9600, SERIAL_8N1, 16, 17);  // Communication with Arduino Mega (RX=16, TX=17)
+  
+  delay(1000);
+  
+  Serial.println("\n==========================================");
+  Serial.println("ESP32 -> Google Sheets Data Forwarder");
+  Serial.println("==========================================");
+  Serial.println("Features:");
+  Serial.println("  - POST method with JSON");
+  Serial.println("  - STOP command support");
+  Serial.println("  - Auto WiFi reconnection");
+  Serial.println("  - 10 second send interval");
+  Serial.println("==========================================");
+  
+  // Connect to WiFi network
+  connectWiFi();
+  
+  Serial.println("\nReady! Waiting for data from Mega...");
+  Serial.println("Commands from Mega:");
+  Serial.println("  DATA:... - Send sensor data");
+  Serial.println("  MODE:XXX - Change mode");
+  Serial.println("  STOP     - Stop sending to Google Sheets");
+  Serial.println("  RESET    - Reset system");
+}
+
+// ================= MAIN LOOP =================
+void loop() {
+  // Read data from Arduino Mega via Serial2
+  while (Serial2.available()) {
+    char c = Serial2.read();
+    if (c == '\n') {
+      // Complete line received, process it
+      parseMegaData(receiveBuffer);
+      receiveBuffer = "";
+    } else if (c != '\r') {
+      // Ignore carriage returns, add other characters to buffer
+      receiveBuffer += c;
+    }
+  }
+  
+  // Periodic WiFi health check (every 30 seconds)
+  static unsigned long lastWiFiCheck = 0;
+  if (millis() - lastWiFiCheck > 30000) {
+    lastWiFiCheck = millis();
+    if (WiFi.status() != WL_CONNECTED) {
+      reconnectWiFi();
+    }
+  }
+  
+  delay(10);
+}

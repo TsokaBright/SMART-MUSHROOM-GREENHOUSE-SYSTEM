@@ -1,0 +1,211 @@
+// ============================================
+// GOOGLE APPS SCRIPT FOR MUSHROOM GREENHOUSE
+// ============================================
+
+var SPREADSHEET_ID = SpreadsheetApp.getActiveSpreadsheet().getId();
+var SHEET_NAME = "Sheet1"; // Change to your sheet name if different
+
+function doGet(e) {
+  // Handle GET requests (for testing)
+  if (e && e.parameter && e.parameter.test) {
+    return ContentService.createTextOutput("SUCCESS: Google Script is running!");
+  }
+  
+  // Handle data logging via GET parameters
+  if (e && e.parameter) {
+    return logDataToSheet(e.parameter);
+  }
+  
+  return ContentService.createTextOutput("ERROR: No data received. Send POST or GET with parameters.");
+}
+
+function doPost(e) {
+  // Handle POST requests
+  try {
+    var params;
+    
+    // Check if data is JSON or form-encoded
+    if (e.postData.type == "application/json") {
+      params = JSON.parse(e.postData.contents);
+    } else {
+      // Parse URL encoded parameters
+      params = e.parameter;
+    }
+    
+    return logDataToSheet(params);
+    
+  } catch(error) {
+    return ContentService.createTextOutput("ERROR: " + error.toString());
+  }
+}
+
+function logDataToSheet(params) {
+  try {
+    // Get the spreadsheet and sheet
+    var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    var sheet = ss.getSheetByName(SHEET_NAME);
+    
+    if (!sheet) {
+      sheet = ss.getActiveSheet();
+    }
+    
+    // Extract all parameters with error handling
+    var temp1 = parseFloat(params.temp1) || 0;
+    var temp2 = parseFloat(params.temp2) || 0;
+    var temp3 = parseFloat(params.temp3) || 0;
+    var temp4 = parseFloat(params.temp4) || 0;
+    var temp5 = parseFloat(params.temp5) || 0;
+    
+    var hum1 = parseFloat(params.hum1) || 0;
+    var hum2 = parseFloat(params.hum2) || 0;
+    var hum3 = parseFloat(params.hum3) || 0;
+    var hum4 = parseFloat(params.hum4) || 0;
+    var hum5 = parseFloat(params.hum5) || 0;
+    
+    var co2 = parseInt(params.co2) || 0;
+    
+    var moist1 = parseFloat(params.moist1) || 0;
+    var moist2 = parseFloat(params.moist2) || 0;
+    var moist3 = parseFloat(params.moist3) || 0;
+    var moist4 = parseFloat(params.moist4) || 0;
+    var moist5 = parseFloat(params.moist5) || 0;
+    
+    var mode = params.mode || "UNKNOWN";
+    var status = params.status || "ACTIVE";
+    
+    // Create timestamp
+    var timestamp = new Date();
+    
+    // Append new row with all data
+    sheet.appendRow([
+      timestamp,      // A: Timestamp
+      temp1,          // B: Zone1 Temp
+      hum1,           // C: Zone1 Humidity
+      temp2,          // D: Zone2 Temp
+      hum2,           // E: Zone2 Humidity
+      temp3,          // F: Zone3 Temp
+      hum3,           // G: Zone3 Humidity
+      temp4,          // H: Zone4 Temp
+      hum4,           // I: Zone4 Humidity
+      temp5,          // J: Zone5 Temp
+      hum5,           // K: Zone5 Humidity
+      co2,            // L: CO2
+      moist1,         // M: Substrate1
+      moist2,         // N: Substrate2
+      moist3,         // O: Substrate3
+      moist4,         // P: Substrate4
+      moist5,         // Q: Substrate5
+      mode,           // R: Current Mode
+      status          // S: System Status
+    ]);
+    
+    // Optional: Auto-resize columns for better visibility
+    sheet.autoResizeColumns(1, 19);
+    
+    // Return success response
+    return ContentService.createTextOutput("SUCCESS");
+    
+  } catch(error) {
+    Logger.log("Error: " + error.toString());
+    return ContentService.createTextOutput("ERROR: " + error.toString());
+  }
+}
+
+// Optional: Function to get the last 10 readings
+function getLatestReadings(numRows = 10) {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var sheet = ss.getSheetByName(SHEET_NAME);
+  var lastRow = sheet.getLastRow();
+  
+  if (lastRow <= 1) return [];
+  
+  var startRow = Math.max(1, lastRow - numRows + 1);
+  var numRows_data = lastRow - startRow + 1;
+  
+  return sheet.getRange(startRow, 1, numRows_data, 19).getValues();
+}
+
+// Optional: Function to create a summary statistics sheet
+function createSummarySheet() {
+  var ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  var dataSheet = ss.getSheetByName(SHEET_NAME);
+  var summarySheet = ss.getSheetByName("Summary");
+  
+  if (!summarySheet) {
+    summarySheet = ss.insertSheet("Summary");
+  }
+  
+  summarySheet.clear();
+  
+  // Get all data (skip header)
+  var lastRow = dataSheet.getLastRow();
+  if (lastRow <= 1) return;
+  
+  var data = dataSheet.getRange(2, 2, lastRow - 1, 17).getValues();
+  
+  // Calculate statistics for each sensor type
+  var headers = ["Parameter", "Min", "Max", "Avg", "Current"];
+  summarySheet.getRange(1, 1, 1, 5).setValues([headers]);
+  summarySheet.getRange(1, 1, 1, 5).setFontWeight("bold");
+  
+  var stats = [];
+  
+  // Temperature zones (columns 0-4)
+  for (var i = 0; i < 5; i++) {
+    var temps = data.map(function(row) { return row[i]; }).filter(function(v) { return v > 0; });
+    if (temps.length > 0) {
+      stats.push([
+        "Zone " + (i+1) + " Temp (°C)",
+        Math.min.apply(null, temps),
+        Math.max.apply(null, temps),
+        (temps.reduce(function(a,b) { return a + b; }, 0) / temps.length).toFixed(1),
+        temps[temps.length - 1]
+      ]);
+    }
+  }
+  
+  // Humidity zones (columns 5-9)
+  for (var i = 0; i < 5; i++) {
+    var hums = data.map(function(row) { return row[i+5]; }).filter(function(v) { return v > 0; });
+    if (hums.length > 0) {
+      stats.push([
+        "Zone " + (i+1) + " Humidity (%)",
+        Math.min.apply(null, hums),
+        Math.max.apply(null, hums),
+        (hums.reduce(function(a,b) { return a + b; }, 0) / hums.length).toFixed(0),
+        hums[hums.length - 1]
+      ]);
+    }
+  }
+  
+  // CO2 (column 10)
+  var co2s = data.map(function(row) { return row[10]; }).filter(function(v) { return v > 0; });
+  if (co2s.length > 0) {
+    stats.push([
+      "CO2 (ppm)",
+      Math.min.apply(null, co2s),
+      Math.max.apply(null, co2s),
+      (co2s.reduce(function(a,b) { return a + b; }, 0) / co2s.length).toFixed(0),
+      co2s[co2s.length - 1]
+    ]);
+  }
+  
+  // Soil moisture (columns 11-15)
+  for (var i = 0; i < 5; i++) {
+    var moist = data.map(function(row) { return row[i+11]; }).filter(function(v) { return v > 0; });
+    if (moist.length > 0) {
+      stats.push([
+        "Substrate " + (i+1) + " Moisture (%)",
+        Math.min.apply(null, moist),
+        Math.max.apply(null, moist),
+        (moist.reduce(function(a,b) { return a + b; }, 0) / moist.length).toFixed(0),
+        moist[moist.length - 1]
+      ]);
+    }
+  }
+  
+  if (stats.length > 0) {
+    summarySheet.getRange(2, 1, stats.length, 5).setValues(stats);
+    summarySheet.autoResizeColumns(1, 5);
+  }
+}
